@@ -55,3 +55,21 @@
 # st-aggrid
 # pypdf
 # requests
+
+
+
+
+
+streamlit
+pandas
+python-dotenv
+plotly
+streamlit-aggrid
+langchain-community
+langchain-core
+langchain-text-splitters
+langchain-groq
+langchain-huggingface
+sentence-transformers
+faiss-cpu
+pypdf
