@@ -20,38 +20,38 @@
 # pip install -r requirements.txt
 #
 # -------- OR Install Individually: --------
-pip install streamlit==1.32.2
-pip install pandas
-pip install numpy
-pip install python-dotenv
-pip install langchain
-pip install langchain-community
-pip install langchain-core
-pip install langchain-groq
-pip install langchain-huggingface
-pip install sentence-transformers
-pip install faiss-cpu
-pip install plotly
-pip install st-aggrid
-pip install pypdf
-pip install requests
+# pip install streamlit==1.32.2 
+# pip install pandas
+# pip install numpy
+# pip install python-dotenv
+# pip install langchain
+# pip install langchain-community
+# pip install langchain-core
+# pip install langchain-groq
+# pip install langchain-huggingface
+# pip install sentence-transformers
+# pip install faiss-cpu
+# pip install plotly
+# pip install st-aggrid
+# pip install pypdf
+# pip install requests
 
 
 # ================================
 # Actual Dependencies
 # ================================
-streamlit==1.32.2
-pandas
-numpy
-python-dotenv
-langchain
-langchain-community
-langchain-core
-langchain-groq
-langchain-huggingface
-sentence-transformers
-faiss-cpu
-plotly
-st-aggrid
-pypdf
-requests
+# streamlit==1.32.2
+# pandas
+# numpy
+# python-dotenv
+# langchain
+# langchain-community
+# langchain-core
+# langchain-groq
+# langchain-huggingface
+# sentence-transformers
+# faiss-cpu
+# plotly
+# st-aggrid
+# pypdf
+# requests
