@@ -73,3 +73,8 @@ langchain-huggingface
 sentence-transformers
 faiss-cpu
 pypdf
+
+
+
+
+pinecone="pcsk_6m4jwe_M2sfCo575nzr7L5RZ7cRCEJVTM9GyxL8JT6DBBVFS4inUxsLmpVj1v34HXgroUN"
