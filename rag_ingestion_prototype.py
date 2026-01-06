@@ -1,3 +1,8 @@
+
+
+
+
+
 # import os
 # import json
 # import tempfile
@@ -17,40 +22,60 @@
 # from langchain_text_splitters import RecursiveCharacterTextSplitter
 # from langchain_groq import ChatGroq
 # from langchain_core.output_parsers import StrOutputParser
-# from langchain_community.vectorstores import FAISS
 # from langchain_huggingface import HuggingFaceEmbeddings
 # from langchain_core.documents import Document
+
+# # --- Pinecone Imports ---
+# from pinecone import Pinecone, ServerlessSpec
+# from langchain_pinecone import PineconeVectorStore
 
 # # Load environment variables
 # load_dotenv()
 
 # # ------------------------------------------------------------
-# # DATABASE CONFIG
+# # DATABASE CONFIG & PINECONE INIT
 # # ------------------------------------------------------------
 # BASE_DB_DIR = "vector_db"
 # DB_TYPES = {
 #     "historical": {
-#         "path": os.path.join(BASE_DB_DIR, "historical"),
 #         "meta": os.path.join(BASE_DB_DIR, "historical", "metadata.json")
 #     },
 #     "current": {
-#         "path": os.path.join(BASE_DB_DIR, "current"),
 #         "meta": os.path.join(BASE_DB_DIR, "current", "metadata.json")
 #     }
 # }
 
+# PINECONE_INDEX_NAME = "resume-db"
+
+# # Initialize Pinecone Client
+# pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+
+# # Ensure Index Exists
+# existing_indexes = [i.name for i in pc.list_indexes()]
+# if PINECONE_INDEX_NAME not in existing_indexes:
+#     try:
+#         pc.create_index(
+#             name=PINECONE_INDEX_NAME,
+#             dimension=384,
+#             metric="cosine",
+#             spec=ServerlessSpec(cloud="aws", region="us-east-1")
+#         )
+#     except Exception as e:
+#         st.error(f"Error creating Pinecone index: {e}")
+
 # # ------------------------------------------------------------
-# # INITIALIZE STORAGE DIRECTORIES
+# # INITIALIZE LOCAL METADATA STORAGE
 # # ------------------------------------------------------------
 # def init_storage():
 #     for db_key, cfg in DB_TYPES.items():
-#         Path(cfg["path"]).mkdir(parents=True, exist_ok=True)
+#         folder = os.path.dirname(cfg["meta"])
+#         Path(folder).mkdir(parents=True, exist_ok=True)
 #         if not os.path.exists(cfg["meta"]):
 #             with open(cfg["meta"], "w") as f:
 #                 json.dump({}, f)
 
 # # ------------------------------------------------------------
-# # EMBEDDING LOADER (CACHED)
+# # EMBEDDING LOADER
 # # ------------------------------------------------------------
 # @st.cache_resource
 # def load_embeddings():
@@ -75,21 +100,15 @@
 #         json.dump(meta, f, indent=2)
 
 # # ------------------------------------------------------------
-# # VECTORSTORE LOADING & SAVING
+# # PINECONE VECTORSTORE OPERATIONS
 # # ------------------------------------------------------------
-# def get_vectorstore(embeddings, db_type):
-#     index_path = os.path.join(DB_TYPES[db_type]["path"], "faiss_index")
-    
-#     if os.path.exists(index_path):
-#         try:
-#             return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-#         except:
-#             return None
-#     return None
-
-# def save_vectorstore(vs, db_type):
-#     index_path = os.path.join(DB_TYPES[db_type]["path"], "faiss_index")
-#     vs.save_local(index_path)
+# def get_vectorstore(embeddings, namespace):
+#     index = pc.Index(PINECONE_INDEX_NAME)
+#     return PineconeVectorStore(
+#         index=index,
+#         embedding=embeddings,
+#         namespace=namespace
+#     )
 
 # # ------------------------------------------------------------
 # # ADD DOCUMENTS TO VECTORSTORE
@@ -106,13 +125,7 @@
 #         })
 
 #     vs = get_vectorstore(embeddings, db_type)
-
-#     if vs is None:
-#         vs = FAISS.from_documents(splits, embeddings)
-#     else:
-#         vs.add_documents(splits)
-
-#     save_vectorstore(vs, db_type)
+#     vs.add_documents(splits)
 
 #     meta = load_metadata(db_type)
 #     meta[file_id] = meta_entry
@@ -148,7 +161,6 @@
 #         }
 
 #         add_to_vectordb(docs, embeddings, target_db, file_id, uploaded_file.name, meta_entry)
-
 #         return file_id, docs, full_text
 
 #     finally:
@@ -156,23 +168,17 @@
 #             os.remove(tmp_path)
 
 # # ------------------------------------------------------------
-# # RETRIEVE RESUME TEXT FROM VECTORSTORE
+# # RETRIEVE RESUME TEXT
 # # ------------------------------------------------------------
 # def get_resume_text(file_id, db_type, embeddings):
 #     vs = get_vectorstore(embeddings, db_type)
-#     if not vs:
+#     results = vs.similarity_search("", k=100, filter={"resume_id": file_id})
+#     if not results:
 #         return None
-
-#     all_docs = vs.similarity_search("", k=5000)
-#     docs = [d for d in all_docs if d.metadata.get("resume_id") == file_id]
-
-#     if not docs:
-#         return None
-
-#     return "\n\n".join([d.page_content for d in docs])
+#     return "\n\n".join([d.page_content for d in results])
 
 # # ------------------------------------------------------------
-# # DELETE RESUME FROM DB
+# # DELETE RESUME
 # # ------------------------------------------------------------
 # def delete_from_db(file_id, db_type, embeddings):
 #     meta = load_metadata(db_type)
@@ -180,25 +186,22 @@
 #         del meta[file_id]
 #         save_metadata(meta, db_type)
 
-#     vs = get_vectorstore(embeddings, db_type)
-#     if not vs:
-#         return
-
-#     all_docs = vs.similarity_search("", k=8000)
-#     filtered = [d for d in all_docs if d.metadata.get("resume_id") != file_id]
-
-#     if not filtered:
-#         shutil.rmtree(os.path.join(DB_TYPES[db_type]["path"], "faiss_index"), ignore_errors=True)
-#     else:
-#         new_vs = FAISS.from_documents(filtered, embeddings)
-#         save_vectorstore(new_vs, db_type)
+#     index = pc.Index(PINECONE_INDEX_NAME)
+#     try:
+#         index.delete(filter={"resume_id": file_id}, namespace=db_type)
+#     except Exception as e:
+#         st.error(f"Error deleting from Pinecone: {e}")
 
 # # ------------------------------------------------------------
-# # CLEAR ENTIRE DATABASE
+# # CLEAR DATABASE
 # # ------------------------------------------------------------
 # def clear_database(db_type):
-#     shutil.rmtree(DB_TYPES[db_type]["path"], ignore_errors=True)
-#     init_storage()
+#     save_metadata({}, db_type)
+#     index = pc.Index(PINECONE_INDEX_NAME)
+#     try:
+#         index.delete(delete_all=True, namespace=db_type)
+#     except Exception as e:
+#         st.error(f"Error clearing Pinecone namespace: {e}")
 
 # # ------------------------------------------------------------
 # # LOAD LLM
@@ -244,7 +247,6 @@
 # def evaluate_candidate(llm, resume_text, jd):
 #     prompt = ChatPromptTemplate.from_template(SHORTLIST_PROMPT)
 #     chain = prompt | llm | StrOutputParser()
-
 #     try:
 #         response = chain.invoke({"resume_text": resume_text, "jd": jd})
 #         if not response or "{" not in response:
@@ -253,249 +255,119 @@
 #         start = response.find("{")
 #         end = response.rfind("}") + 1
 #         cleaned = response[start:end]
-
 #         return json.loads(cleaned)
-
 #     except Exception as e:
 #         st.error(f"LLM error: {e}")
 #         return None
 
 # # ------------------------------------------------------------
-# # CUSTOM CSS STYLING
+# # CUSTOM CSS
 # # ------------------------------------------------------------
 # def load_custom_css():
 #     st.markdown("""
 #     <style>
-
-#     /* Sidebar Container */
-#     [data-testid="stSidebar"] {
-#         background-color: #E8F1FA !important;  
-#         padding-top: 30px !important;
-#         border-right: 1px solid #CFD9E6 !important; 
-#     }
-
-#     /* Logo inside sidebar */
-#     .sidebar-logo img {
-#         width: 120px !important;
-#         border-radius: 50% !important;
-#         display: block !important;
-#         margin-left: auto !important;
-#         margin-right: auto !important;
-#         margin-top: 10px !important;
-#         margin-bottom: 25px !important;
-#     }
-
-#     /* Navigation Title */
-#     .sidebar-title {
-#         color: #1E3A8A !important;  
-#         font-size: 20px !important;
-#         font-weight: 700 !important;
-#         padding-left: 20px !important;
-#         margin-bottom: 20px !important;
-#     }
-
-#     /* Navigation Radio Buttons Text */
-#     .sidebar .stRadio label {
-#         color: #1F2937 !important;  
-#         font-size: 16px !important;
-#         font-weight: 600 !important;
-#         padding: 5px 10px !important;
-#         border-radius: 6px !important;
-#     }
-
-#     /* Hover Effect */
-#     [data-testid="stSidebar"] .stRadio label:hover {
-#         background-color: #DCEBFA !important;
-#         color: #1E40AF !important;
-#     }
-
-#     /* Active Selected Option */
-#     [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label[data-selected="true"] {
-#         background-color: #D0E4FF !important;
-#         color: #1E3A8A !important;
-#         font-weight: 700 !important;
-#         border-radius: 6px !important;
-#         padding: 6px 12px !important;
-#     }
-
-#     /* Score Badges */
+#     [data-testid="stSidebar"] { background-color: #E8F1FA !important; padding-top: 30px !important; border-right: 1px solid #CFD9E6 !important; }
+#     .sidebar-logo img { width: 120px !important; border-radius: 50% !important; display: block !important; margin-left: auto !important; margin-right: auto !important; margin-top: 10px !important; margin-bottom: 25px !important; }
+#     .sidebar-title { color: #1E3A8A !important; font-size: 20px !important; font-weight: 700 !important; padding-left: 20px !important; margin-bottom: 20px !important; }
+#     .sidebar .stRadio label { color: #1F2937 !important; font-size: 16px !important; font-weight: 600 !important; padding: 5px 10px !important; border-radius: 6px !important; }
+#     [data-testid="stSidebar"] .stRadio label:hover { background-color: #DCEBFA !important; color: #1E40AF !important; }
+#     [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label[data-selected="true"] { background-color: #D0E4FF !important; color: #1E3A8A !important; font-weight: 700 !important; border-radius: 6px !important; padding: 6px 12px !important; }
 #     .badge-pass { background-color: #DEF7EC; color: #03543F; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
 #     .badge-mid { background-color: #FEF3C7; color: #92400E; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
 #     .badge-low { background-color: #FDE8E8; color: #9B1C1C; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-
-#     /* Cards */
-#     .card {
-#         padding: 20px;
-#         background-color: #FFFFFF;
-#         border-radius: 10px;
-#         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-#         margin-bottom: 20px;
-#         color: #333;
-#     }
-#     .main-title {
-#         color: #1E3A8A;
-#         font-weight: 800;
-#         margin-bottom: 10px;
-#     }
-#     .section-header {
-#         color: #1E40AF;
-#         margin-top: 20px;
-#         margin-bottom: 10px;
-#         border-bottom: 2px solid #E5E7EB;
-#         padding-bottom: 5px;
-#     }
-
+#     .card { padding: 20px; background-color: #FFFFFF; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; color: #333; }
+#     .main-title { color: #1E3A8A; font-weight: 800; margin-bottom: 10px; }
+#     .section-header { color: #1E40AF; margin-top: 20px; margin-bottom: 10px; border-bottom: 2px solid #E5E7EB; padding-bottom: 5px; }
 #     </style>
 #     """, unsafe_allow_html=True)
 
 # # ------------------------------------------------------------
-# # SIDEBAR NAVIGATION
+# # SIDEBAR
 # # ------------------------------------------------------------
 # def sidebar_logo():
-#     # Make sure 'nx.png' exists or replace with a placeholder logic
 #     logo_path = "nx.png"
-    
 #     if os.path.exists(logo_path):
 #         logo_encoded = base64.b64encode(open(logo_path, "rb").read()).decode()
-#         st.sidebar.markdown(
-#             f"""
-#             <div class="sidebar-logo">
-#                 <img src="data:image/png;base64,{logo_encoded}">
-#             </div>
-#             """,
-#             unsafe_allow_html=True
-#         )
+#         st.sidebar.markdown(f"""<div class="sidebar-logo"><img src="data:image/png;base64,{logo_encoded}"></div>""", unsafe_allow_html=True)
 #     else:
 #         st.sidebar.markdown("<h2 style='text-align:center;'>HR AI</h2>", unsafe_allow_html=True)
-
+    
 #     st.sidebar.markdown("<div class='sidebar-title'>Navigation</div>", unsafe_allow_html=True)
-
-#     return st.sidebar.radio(
-#         "",
-#         [
-#             "🏠 Dashboard",
-#             "📤 Upload Resumes",
-#             "📊 Shortlist Candidates",
-#             "📁 Manage Databases",
-#             "⚙️ Settings"
-#         ]
-#     )
+#     return st.sidebar.radio("", ["🏠 Dashboard", "📤 Upload Resumes", "📊 Shortlist Candidates", "📁 Manage Databases", "⚙️ Settings"])
 
 # # ------------------------------------------------------------
-# # PAGE 1: DASHBOARD HOME
+# # PAGE 1: DASHBOARD
 # # ------------------------------------------------------------
 # def render_dashboard_home():
 #     load_custom_css()
-
 #     st.markdown("<h1 class='main-title'>HR Analytics Dashboard</h1>", unsafe_allow_html=True)
 #     st.markdown("<div class='card'>A complete overview of your hiring pipeline and screening activity.</div>", unsafe_allow_html=True)
-
-#     # Load metadata
+    
 #     hist_meta = load_metadata("historical")
 #     curr_meta = load_metadata("current")
-
-#     # Summary metrics
+    
 #     col1, col2, col3 = st.columns(3)
-#     with col1:
-#         st.metric("Total Resumes", len(hist_meta))
-#     with col2:
-#         st.metric("Shortlisted (Current DB)", len(curr_meta))
+#     with col1: st.metric("Total Resumes", len(hist_meta))
+#     with col2: st.metric("Shortlisted (Current DB)", len(curr_meta))
 #     with col3:
 #         today = datetime.now().strftime("%Y%m%d")
 #         today_count = sum(1 for v in hist_meta.values() if v["upload_date"].startswith(today))
 #         st.metric("Uploaded Today", today_count)
 
-#     # Pie chart for shortlisted vs rejected
 #     shortlisted = len(curr_meta)
 #     rejected = max(0, len(hist_meta) - shortlisted)
+#     if shortlisted + rejected > 0:
+#         fig = px.pie(names=["Shortlisted", "Rejected"], values=[shortlisted, rejected], title="Shortlisting Distribution")
+#         st.plotly_chart(fig, use_container_width=True)
+#     else:
+#         st.info("No data available for charts yet.")
 
-#     fig = px.pie(
-#         names=["Shortlisted", "Rejected"],
-#         values=[shortlisted, rejected],
-#         title="Shortlisting Distribution"
-#     )
-#     st.plotly_chart(fig, use_container_width=True)
-
-#     # Upload trends chart
-#     upload_dates = [
-#         v["upload_date"][:8]  # extract YYYYMMDD
-#         for v in hist_meta.values()
-#     ]
-
+#     upload_dates = [v["upload_date"][:8] for v in hist_meta.values()]
 #     if upload_dates:
 #         df = pd.DataFrame(upload_dates, columns=["date"])
 #         upload_trend = df["date"].value_counts().sort_index()
-
-#         fig2 = px.line(
-#             x=upload_trend.index,
-#             y=upload_trend.values,
-#             title="Resume Upload Trend"
-#         )
+#         fig2 = px.line(x=upload_trend.index, y=upload_trend.values, title="Resume Upload Trend")
 #         fig2.update_layout(xaxis_title="Date", yaxis_title="Uploads")
 #         st.plotly_chart(fig2, use_container_width=True)
 
 # # ------------------------------------------------------------
-# # PAGE 2: UPLOAD RESUMES
+# # PAGE 2: UPLOAD
 # # ------------------------------------------------------------
 # def render_upload_page(embeddings):
 #     load_custom_css()
-
 #     st.markdown("<h1 class='main-title'>📤 Upload Resumes</h1>", unsafe_allow_html=True)
-#     st.markdown(
-#         "<div class='card'>Upload resumes into the CURRENT database. "
-#         "After shortlisting, HR can archive them into the Historical Database.</div>",
-#         unsafe_allow_html=True
-#     )
+#     st.markdown("<div class='card'>Upload resumes into the CURRENT database. After shortlisting, HR can archive them into the Historical Database.</div>", unsafe_allow_html=True)
 
-#     uploaded_files = st.file_uploader(
-#         "Drag & drop PDF/TXT files",
-#         type=["pdf", "txt"],
-#         accept_multiple_files=True,
-#         key="resume_uploader"
-#     )
-
+#     uploaded_files = st.file_uploader("Drag & drop PDF/TXT files", type=["pdf", "txt"], accept_multiple_files=True, key="resume_uploader")
 #     if st.button("Process Uploads", type="primary", key="process_upload_button"):
 #         if not uploaded_files:
 #             st.warning("Please upload at least one resume.")
 #             return
 
-#         # Check duplicates only in CURRENT DB
 #         existing_meta = load_metadata("current")
 #         existing_names = {m["original_name"].lower() for m in existing_meta.values()}
-
-#         duplicates = []
-#         new_files = []
+#         duplicates, new_files = [], []
 
 #         for f in uploaded_files:
-#             if f.name.lower() in existing_names:
-#                 duplicates.append(f.name)
-#             else:
-#                 new_files.append(f)
+#             (duplicates if f.name.lower() in existing_names else new_files).append(f)
 
 #         if duplicates:
-#             st.warning("⚠️ Duplicate resumes skipped:\n" + "\n".join([f"- {x}" for x in duplicates]))
-
+#             st.warning("⚠️ Duplicate resumes skipped:\n" + "\n".join([f"- {x.name}" for x in duplicates]))
 #         if not new_files:
 #             st.error("All uploaded resumes were duplicates in CURRENT DB.")
 #             return
 
 #         progress = st.progress(0)
 #         uploaded_info = []
-
 #         for idx, f in enumerate(new_files):
 #             try:
 #                 file_id, docs, text = process_upload(f, embeddings, "current")
-#                 uploaded_info.append({
-#                     "File Name": f.name,
-#                     "Preview": text[:200] + "..."
-#                 })
+#                 uploaded_info.append({"File Name": f.name, "Preview": text[:200] + "..."})
 #             except Exception as e:
 #                 st.error(f"Error processing {f.name}: {e}")
-
 #             progress.progress((idx + 1) / len(new_files))
 
-#         st.success("🎉 Upload complete! Added to CURRENT database.")
-
+#         st.success("🎉 Upload complete! Added to CURRENT database (Pinecone).")
 #         if uploaded_info:
 #             st.markdown("<h3 class='section-header'>Uploaded Resumes Summary</h3>", unsafe_allow_html=True)
 #             df = pd.DataFrame(uploaded_info)
@@ -505,34 +377,16 @@
 #             AgGrid(df, gridOptions=builder.build(), height=300, theme="balham", key="upload_summary_grid")
 
 # # ------------------------------------------------------------
-# # PAGE 3: AI SHORTLISTING (UPDATED WITH DELETE & CSV)
+# # PAGE 3: AI SHORTLISTING (UPDATED)
 # # ------------------------------------------------------------
 # def render_shortlist_page(llm, embeddings):
 #     load_custom_css()
-
 #     st.markdown("<h1 class='main-title'>📊 AI Resume Shortlisting</h1>", unsafe_allow_html=True)
-#     st.markdown("""
-#         <div class='card'>
-#             The AI evaluates each resume against the provided Job Description and generates a score,
-#             decision, and reasoning. HR can export the report and later archive the Current Database.
-#         </div>
-#     """, unsafe_allow_html=True)
+#     st.markdown("<div class='card'>The AI evaluates each resume against the provided Job Description. HR can export the report and archive the Current Database.</div>", unsafe_allow_html=True)
 
-#     # JD Templates
 #     st.markdown("<h3 class='section-header'>Job Description</h3>", unsafe_allow_html=True)
-#     template_option = st.selectbox(
-#         "Select a JD Template",
-#         [
-#             "Write JD manually",
-#             "Software Engineer",
-#             "Data Analyst",
-#             "Backend Developer",
-#             "Flutter Developer",
-#             "Product Manager",
-#             "DevOps Engineer"
-#         ]
-#     )
-
+#     template_option = st.selectbox("Select a JD Template", ["Write JD manually", "Software Engineer", "Data Analyst", "Backend Developer", "Flutter Developer", "Product Manager", "DevOps Engineer"])
+    
 #     jd_presets = {
 #         "Software Engineer": "We need a Software Engineer skilled in DSA, Python/Java, OOP, Git, SQL, API development, and SDLC.",
 #         "Data Analyst": "We seek a Data Analyst skilled in Excel, SQL, Python, dashboards, visualizations, and reporting.",
@@ -541,27 +395,16 @@
 #         "Product Manager": "We need a PM experienced in PRDs, roadmaps, KPIs, user interviews, and cross-team communication.",
 #         "DevOps Engineer": "We seek a DevOps Engineer skilled in AWS, Docker, CI/CD pipelines, Kubernetes, and monitoring."
 #     }
+#     jd = st.text_area("Enter JD", height=150) if template_option == "Write JD manually" else st.text_area("Enter JD", jd_presets[template_option], height=150)
 
-#     if template_option == "Write JD manually":
-#         jd = st.text_area("Enter JD", height=150)
-#     else:
-#         jd = st.text_area("Enter JD", jd_presets[template_option], height=150)
-
-#     # Candidate Source Info
 #     st.markdown("<h3 class='section-header'>Candidate Source</h3>", unsafe_allow_html=True)
-#     st.info("Shortlisting will be performed on **Current Database** only.")
-    
 #     db_key = "current"
 #     metadata = load_metadata("current")
 #     st.info(f"Total candidates in Current Database: **{len(metadata)}**")
 
-#     # Start Evaluation
 #     if st.button("🚀 Run AI Evaluation", type="primary"):
-#         if not jd:
-#             st.warning("Please enter a Job Description.")
-#             return
-#         if not metadata:
-#             st.error("No candidates available in Current Database.")
+#         if not jd or not metadata:
+#             st.error("Please provide a JD and ensure candidates exist in the database.")
 #             return
 
 #         progress = st.progress(0)
@@ -570,27 +413,25 @@
 
 #         for idx, (file_id, info) in enumerate(metadata.items()):
 #             resume_text = get_resume_text(file_id, db_key, embeddings)
-#             if not resume_text:
-#                 continue
+#             if not resume_text: continue
 
 #             eval_result = evaluate_candidate(llm, resume_text, jd)
-#             if not eval_result:
-#                 continue
+#             if not eval_result: continue
 
 #             score = eval_result.get("score", 0)
+            
+#             # Badge logic kept for potential future use or color coding if needed, 
+#             # but will be hidden in table as per request.
+#             if score >= 75: badge = "<span class='badge-pass'>Excellent</span>"
+#             elif score >= 60: badge = "<span class='badge-mid'>Good</span>"
+#             else: badge = "<span class='badge-low'>Poor</span>"
 
-#             if score >= 75:
-#                 badge = "<span class='badge-pass'>Excellent</span>"
-#             elif score >= 60:
-#                 badge = "<span class='badge-mid'>Good</span>"
-#             else:
-#                 badge = "<span class='badge-low'>Poor</span>"
-
-#             # Update Metadata
-#             info["name"] = eval_result.get("name", "-")
-#             info["surname"] = eval_result.get("surname", "-")
-#             info["phone"] = eval_result.get("phone", "-")
-#             info["email"] = eval_result.get("email", "-")
+#             info.update({
+#                 "name": eval_result.get("name", "-"),
+#                 "surname": eval_result.get("surname", "-"),
+#                 "phone": eval_result.get("phone", "-"),
+#                 "email": eval_result.get("email", "-")
+#             })
 #             save_metadata(metadata, db_key)
 
 #             results.append({
@@ -599,26 +440,24 @@
 #                 "Email": info["email"],
 #                 "Phone": info["phone"],
 #                 "Score": score,
-#                 "Badge": badge,
 #                 "Decision": eval_result.get("decision", ""),
 #                 "Reason": eval_result.get("reason", ""),
+#                 # Hidden columns needed for logic
+#                 "Badge": badge,
 #                 "File Name": info["original_name"],
 #                 "Resume ID": file_id,
 #                 "Promoted": "No",
 #                 "Text": resume_text
 #             })
-
 #             progress.progress((idx + 1) / total)
 
 #         if not results:
 #             st.error("No results generated.")
 #             return
-
+        
 #         st.success("🎉 Evaluation Complete!")
-#         # Save to session state so it persists
 #         st.session_state['shortlist_results'] = results
 
-#     # Display Results if they exist in Session State
 #     if 'shortlist_results' in st.session_state:
 #         results = st.session_state['shortlist_results']
 #         df = pd.DataFrame(results)
@@ -628,117 +467,94 @@
 #         builder = GridOptionsBuilder.from_dataframe(df)
 #         builder.configure_pagination(enabled=True)
 #         builder.configure_default_column(editable=False, filter=True, sortable=True)
-#         builder.configure_column("Badge", cellRenderer="html")
 #         builder.configure_selection("single")
 
-#         grid = AgGrid(
-#             df,
-#             gridOptions=builder.build(),
-#             height=420,
-#             theme="material",
-#             update_mode="MODEL_CHANGED",
-#             key="shortlist_grid"
-#         )
+#         # --- UPDATE: Hide columns user does not want to see ---
+#         # User requested: name, surname, email, phone, score, decision, reason ONLY.
+#         cols_to_hide = ["File Name", "Resume ID", "Promoted", "Text", "Badge"]
+#         for col in cols_to_hide:
+#             builder.configure_column(col, hide=True)
+        
+#         # Ensure Score is treated as a number
+#         builder.configure_column("Score", type=["numericColumn", "numberColumnFilter"])
 
+#         grid = AgGrid(df, gridOptions=builder.build(), height=420, theme="material", update_mode="MODEL_CHANGED", key="shortlist_grid")
 #         selected = grid["selected_rows"]
 
-#         # Resume Viewer & Delete Functionality
+#         # Resume Viewer Logic
 #         if selected:
 #             st.markdown("<h3 class='section-header'>Resume Viewer & Actions</h3>", unsafe_allow_html=True)
 #             row = selected[0]
-
 #             col_view, col_action = st.columns([3, 1])
-
 #             with col_view:
 #                 st.write(f"### {row['Name']} {row['Surname']}")
-#                 st.write(f"📧 {row['Email']}")
-#                 st.write(f"📞 {row['Phone']}")
-#                 st.markdown(row["Badge"], unsafe_allow_html=True)
-            
+#                 st.write(f"📧 {row['Email']} | 📞 {row['Phone']}")
+#                 # Using Badge HTML here is fine for detail view, just not table
+#                 st.markdown(f"**Score:** {row['Score']} " + row['Badge'], unsafe_allow_html=True)
 #             with col_action:
 #                 st.write("Does this candidate not fit?")
 #                 if st.button("🗑️ Delete Candidate", type="secondary"):
 #                     delete_from_db(row["Resume ID"], "current", embeddings)
-#                     st.warning(f"Deleted {row['Name']} {row['Surname']}. Please re-run evaluation or refresh.")
-                    
-#                     # Remove from current session results
+#                     st.warning(f"Deleted {row['Name']} {row['Surname']}. Please re-run evaluation.")
 #                     st.session_state['shortlist_results'] = [r for r in results if r['Resume ID'] != row['Resume ID']]
 #                     st.rerun()
-
 #             st.write("---")
 #             st.text_area("Resume Text", row["Text"], height=350)
 
-#         # Export Buttons (Excel, JSON, CSV)
+#         # --- UPDATE: Export Buttons (Single CSV Only) ---
 #         st.markdown("<h3 class='section-header'>Export Results</h3>", unsafe_allow_html=True)
-#         col1, col2, col3 = st.columns(3)
+        
+#         # Prepare clean dataframe for export (only requested columns)
+#         export_columns = ["Name", "Surname", "Email", "Phone", "Score", "Decision", "Reason"]
+#         # Ensure these columns exist before selecting
+#         valid_export_cols = [c for c in export_columns if c in df.columns]
+#         df_export = df[valid_export_cols]
 
-#         df_export = df.drop(columns=["Text", "Badge"]) # Clean dataframe for export
-
-#         with col1:
-#             if st.button("📄 Export as Excel"):
-#                 df_export.to_excel("shortlist_results.xlsx", index=False)
-#                 st.success("Saved as shortlist_results.xlsx")
-
-#         with col2:
-#             if st.button("📑 Export as JSON"):
-#                 with open("shortlist_results.json", "w") as f:
-#                     json.dump(results, f, indent=2)
-#                 st.success("Saved as shortlist_results.json")
-
-#         with col3:
-#             csv_data = df_export.to_csv(index=False).encode('utf-8')
-#             st.download_button(
-#                 label="📄 Download CSV",
-#                 data=csv_data,
-#                 file_name="shortlist_results.csv",
-#                 mime="text/csv",
-#                 key="download-csv"
-#             )
+#         csv_data = df_export.to_csv(index=False).encode('utf-8')
+#         st.download_button(
+#             label="📄 Download CSV",
+#             data=csv_data,
+#             file_name="shortlist_results.csv",
+#             mime="text/csv",
+#             key="download-csv"
+#         )
 
 # # ------------------------------------------------------------
-# # PAGE 4: MANAGE DATABASES
+# # PAGE 4: MANAGE DB
 # # ------------------------------------------------------------
 # def render_manage_databases_page(embeddings):
 #     load_custom_css()
 #     st.markdown("<h1 class='main-title'>📁 Manage Databases</h1>", unsafe_allow_html=True)
-
 #     tabs = st.tabs(["📚 Historical Database", "⭐ Current Database"])
 
 #     def render_db(db_key):
 #         meta = load_metadata(db_key)
-
 #         if not meta:
 #             st.warning("Database is empty.")
 #             return
 
 #         st.markdown(f"<div class='card'>Total resumes stored: <b>{len(meta)}</b></div>", unsafe_allow_html=True)
-
 #         df = pd.DataFrame.from_dict(meta, orient="index")
 #         for col in ["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]:
-#             if col not in df.columns:
-#                 df[col] = "-"
+#             if col not in df.columns: df[col] = "-"
 
 #         view_df = df[["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]]
 #         view_df.columns = ["File Name", "First Name", "Last Name", "Email", "Phone", "Upload Date", "Size"]
-
+        
 #         builder = GridOptionsBuilder.from_dataframe(view_df)
 #         builder.configure_default_column(editable=False, filter=True, sortable=True)
 #         builder.configure_pagination(enabled=True)
 #         builder.configure_selection("multiple")
-
 #         grid = AgGrid(view_df, gridOptions=builder.build(), height=380, theme="balham", key=f"{db_key}_grid")
 #         selected = grid["selected_rows"]
 
 #         st.markdown("<h3 class='section-header'>Delete Selected</h3>", unsafe_allow_html=True)
 #         if st.button(f"🗑️ Delete from {db_key.title()}", key=f"delete_{db_key}"):
-#             if not selected:
-#                 st.warning("No resumes selected.")
+#             if not selected: st.warning("No resumes selected.")
 #             else:
 #                 for row in selected:
-#                     # Reverse lookup file_id
 #                     for fid, m in meta.items():
-#                         if m["original_name"] == row["File Name"]:
-#                             delete_from_db(fid, db_key, embeddings)
+#                         if m["original_name"] == row["File Name"]: delete_from_db(fid, db_key, embeddings)
 #                 st.success("Deleted successfully.")
 #                 st.rerun()
 
@@ -746,11 +562,16 @@
 #             st.markdown("<h3 class='section-header'>Archive</h3>", unsafe_allow_html=True)
 #             if st.button("📦 Archive Current → Historical", key="archive_db"):
 #                 hist_meta = load_metadata("historical")
-#                 for fid, info in meta.items():
-#                     hist_meta[fid] = info
-#                 save_metadata(hist_meta, "historical")
+#                 progress_bar = st.progress(0)
+#                 total_files = len(meta)
+#                 for idx, (fid, info) in enumerate(meta.items()):
+#                     text = get_resume_text(fid, "current", embeddings)
+#                     if text:
+#                         doc = Document(page_content=text, metadata={"source": info["original_name"]})
+#                         add_to_vectordb([doc], embeddings, "historical", fid, info["original_name"], info)
+#                     progress_bar.progress((idx + 1) / total_files)
 #                 clear_database("current")
-#                 st.success("Archived to Historical DB successfully.")
+#                 st.success("Archived to Historical DB successfully (Vectors Moved).")
 #                 st.rerun()
 
 #         st.markdown("<h3 class='section-header'>Danger Zone</h3>", unsafe_allow_html=True)
@@ -759,10 +580,8 @@
 #             st.success(f"{db_key.title()} database cleared.")
 #             st.rerun()
 
-#     with tabs[0]:
-#         render_db("historical")
-#     with tabs[1]:
-#         render_db("current")
+#     with tabs[0]: render_db("historical")
+#     with tabs[1]: render_db("current")
 
 # # ------------------------------------------------------------
 # # PAGE 5: SETTINGS
@@ -773,11 +592,7 @@
 #     st.markdown("<div class='card'>Modify preferences related to the AI model, UI theme, and scoring thresholds.</div>", unsafe_allow_html=True)
 
 #     st.markdown("<h3 class='section-header'>LLM Model</h3>", unsafe_allow_html=True)
-#     model = st.selectbox(
-#         "Choose AI Model",
-#         ["llama-3.1-8b-instant", "llama-3.1-70b", "mixtral-8x7b", "gemma-7b"],
-#         index=0
-#     )
+#     model = st.selectbox("Choose AI Model", ["llama-3.1-8b-instant", "llama-3.1-70b", "mixtral-8x7b", "gemma-7b"], index=0)
 #     st.info(f"Selected model will apply after page restart: **{model}**")
 
 #     st.markdown("<h3 class='section-header'>Shortlisting Thresholds</h3>", unsafe_allow_html=True)
@@ -788,39 +603,24 @@
 #     st.markdown("<h3 class='section-header'>Theme</h3>", unsafe_allow_html=True)
 #     theme = st.selectbox("UI Theme", ["Dark (recommended)", "Light", "High Contrast"])
 #     st.info(f"Selected theme: **{theme}** (Will apply in next release)")
-
 #     st.button("💾 Save Settings", type="primary")
 
 # # ------------------------------------------------------------
-# # MAIN CONTROLLER
+# # MAIN
 # # ------------------------------------------------------------
 # def main():
-#     st.set_page_config(
-#         page_title="Dual-DB Resume Shortlister",
-#         page_icon="🤖",
-#         layout="wide"
-#     )
-
+#     st.set_page_config(page_title="Dual-DB Resume Shortlister", page_icon="🤖", layout="wide")
 #     load_custom_css()
 #     init_storage()
-    
-#     # Load Models
 #     llm = load_llm()
 #     embeddings = load_embeddings()
-
-#     # Sidebar & Routing
 #     menu = sidebar_logo()
 
-#     if menu == "🏠 Dashboard":
-#         render_dashboard_home()
-#     elif menu == "📤 Upload Resumes":
-#         render_upload_page(embeddings)
-#     elif menu == "📊 Shortlist Candidates":
-#         render_shortlist_page(llm, embeddings)
-#     elif menu == "📁 Manage Databases":
-#         render_manage_databases_page(embeddings)
-#     elif menu == "⚙️ Settings":
-#         render_settings_page()
+#     if menu == "🏠 Dashboard": render_dashboard_home()
+#     elif menu == "📤 Upload Resumes": render_upload_page(embeddings)
+#     elif menu == "📊 Shortlist Candidates": render_shortlist_page(llm, embeddings)
+#     elif menu == "📁 Manage Databases": render_manage_databases_page(embeddings)
+#     elif menu == "⚙️ Settings": render_settings_page()
 
 # if __name__ == "__main__":
 #     main()
@@ -831,11 +631,17 @@
 
 
 
+
+
+
+
+# manav code bleow 
 import os
 import json
 import tempfile
 import shutil
 import base64
+import re
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -843,6 +649,9 @@ from pathlib import Path
 from datetime import datetime
 import plotly.express as px
 from st_aggrid import AgGrid, GridOptionsBuilder
+from PIL import Image
+import numpy as np
+import easyocr
 
 # LangChain Imports
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
@@ -879,17 +688,22 @@ PINECONE_INDEX_NAME = "resume-db"
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
 # Ensure Index Exists
-existing_indexes = [i.name for i in pc.list_indexes()]
+existing_indexes = pc.list_indexes().names()
+
 if PINECONE_INDEX_NAME not in existing_indexes:
     try:
         pc.create_index(
             name=PINECONE_INDEX_NAME,
             dimension=384,
             metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+            spec=ServerlessSpec(
+                cloud="aws",
+                region="us-east-1"
+            )
         )
     except Exception as e:
         st.error(f"Error creating Pinecone index: {e}")
+
 
 # ------------------------------------------------------------
 # INITIALIZE LOCAL METADATA STORAGE
@@ -912,6 +726,9 @@ def load_embeddings():
         model_kwargs={'device': 'cpu'},
         encode_kwargs={'normalize_embeddings': True}
     )
+@st.cache_resource
+def load_ocr_reader():
+    return easyocr.Reader(["en"], gpu=False)
 
 # ------------------------------------------------------------
 # METADATA OPERATIONS
@@ -967,13 +784,37 @@ def process_upload(uploaded_file, embeddings, target_db="historical"):
     file_id = f"{timestamp}_{uploaded_file.name}"
 
     ext = uploaded_file.name.split(".")[-1].lower()
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
         tmp.write(uploaded_file.read())
         tmp_path = tmp.name
 
     try:
-        loader = PyPDFLoader(tmp_path) if ext == "pdf" else TextLoader(tmp_path, encoding="utf-8")
-        docs = loader.load()
+        # ---------- PDF ----------
+        if ext == "pdf":
+            loader = PyPDFLoader(tmp_path)
+            docs = loader.load()
+
+        # ---------- TEXT ----------
+        elif ext in ["txt"]:
+            loader = TextLoader(tmp_path, encoding="utf-8")
+            docs = loader.load()
+
+        # ---------- IMAGE (JPG / PNG) ----------
+        elif ext in ["jpg", "jpeg", "png"]:
+            reader = load_ocr_reader()
+            image = np.array(Image.open(tmp_path).convert("RGB"))
+            ocr_text = "\n".join(reader.readtext(image, detail=0))
+
+            docs = [
+                Document(
+                    page_content=ocr_text,
+                    metadata={"source": uploaded_file.name, "file_type": ext}
+                )
+            ]
+
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
 
         full_text = "\n".join([d.page_content for d in docs])
 
@@ -1045,48 +886,140 @@ def load_llm():
 # ------------------------------------------------------------
 # SHORTLIST EVALUATION LOGIC
 # ------------------------------------------------------------
-SHORTLIST_PROMPT = """
-You are an expert HR AI. Evaluate the resume against the job description.
 
-Rules:
-1. Score from 0-100.
-2. If score >= 60 → Shortlisted else Rejected.
-3. Extract: name, surname, email, phone.
-4. Return ONLY JSON.
+# STRICT_SHORTLIST_PROMPT = """
+# You are a Strict Technical Recruiter AI. Validate "Years of Experience" first.
 
-Format:
+# ### PROCESS:
+# 1. **Experience Check:**
+#    - Calculate candidate's total years of experience.
+#    - If Candidate Years < JD Required Years: **REJECT IMMEDIATELY**.
+#    - Max Score for experience mismatch is **40**. 
+#    - Reason must state: "Mismatch in experience: Has X years, needs Y years."
+
+# 2. **Skill Check:**
+#    - Only if experience matches, score skills (0-100).
+#    - Check for "Must Have" skills in JD.
+
+# ### OUTPUT FORMAT:
+# Return a single flat JSON object. Do not nest objects. Do not use Markdown blocks.
+# {{
+#     "name": "Candidate Name",
+#     "surname": "Candidate Surname",
+#     "email": "Candidate Email",
+#     "phone": "Candidate Phone",
+#     "score": 0,
+#     "decision": "Rejected",
+#     "role_fit": "Actual Role (e.g. Junior ML Engineer)",
+#     "reason": "Specific reason for rejection or selection."
+# }}
+
+# ### DATA:
+# RESUME:
+# {resume_text}
+
+# JD:
+# {jd}
+# """
+
+# def evaluate_candidate(llm, resume_text, jd):
+#     prompt = ChatPromptTemplate.from_template(STRICT_SHORTLIST_PROMPT)
+#     chain = prompt | llm | StrOutputParser()
+#     try:
+#         response = chain.invoke({"resume_text": resume_text, "jd": jd})
+        
+#         # --- ROBUST EXTRACTION ---
+#         # 1. Regex to find the JSON object {...} across multiple lines
+#         match = re.search(r"\{.*\}", response, re.DOTALL)
+#         if not match:
+#             return None
+            
+#         json_str = match.group(0)
+        
+#         # 2. Parse JSON safely
+#         return json.loads(json_str)
+
+#     except json.JSONDecodeError:
+#         # Fallback: try to repair common JSON errors
+#         try:
+#             # Sometimes single quotes are used instead of double
+#             json_str = json_str.replace("'", '"')
+#             return json.loads(json_str)
+#         except:
+#             return None
+#     except Exception as e:
+#         # st.error(f"LLM error: {e}") # Silent error to avoid UI clutter
+#         return None
+
+
+STRICT_SHORTLIST_PROMPT = """
+You are an Advanced Technical Recruiter AI. Evaluate the Candidate against the JD.
+
+### STEP 1: DETERMINE ROLE LEVEL
+Analyze the JD to determine the seniority level:
+- **Fresher/Junior:** (0-3 years, "Intern", "Entry Level", "Junior", "Student").
+- **Senior/Mid:** (3+ years, "Senior", "Lead", "Manager").
+
+### STEP 2: EXPERIENCE CALCULATION
+- **If Fresher/Junior Role:** - COUNT Internships, Freelancing, and Capstone Projects as valid experience.
+  - DO NOT reject based on "Student" status if JD allows final-year students.
+  - If JD says "0-1 years" and candidate has 0 years but strong projects -> **SHORTLIST**.
+  
+- **If Senior/Mid Role:**
+  - COUNT ONLY full-time professional experience (exclude internships).
+  - If Candidate Years < JD Required Years -> **REJECT**.
+
+### STEP 3: SCORING (0-100)
+- **90-100 (Excellent):** Meets all skills + has relevant projects/internships (for freshers) or tenure (for seniors).
+- **70-89 (Good):** Meets core skills, minor gaps in experience duration.
+- **< 60 (Rejected):** Missing critical skills (e.g., Python for an ML role) or severe experience mismatch (e.g., Fresher applying for CTO).
+
+### OUTPUT FORMAT (Flat JSON):
+Return valid JSON only. No Markdown.
 {{
-  "name": "",
-  "surname": "",
-  "email": "",
-  "phone": "",
-  "score": 0,
-  "decision": "",
-  "reason": ""
+    "name": "Extract Name",
+    "surname": "Extract Surname",
+    "email": "Extract Email",
+    "phone": "Extract Phone",
+    "score": 0,
+    "decision": "Shortlisted/Rejected",
+    "role_fit": "e.g., Junior AI Engineer",
+    "reason": "Clear explanation citing experience matching JD level (e.g., 'Candidate is a final-year student with relevant Internship experience, matching the Fresher requirement')."
 }}
 
+### DATA:
 RESUME:
 {resume_text}
 
-JOB DESCRIPTION:
+JD:
 {jd}
 """
 
+
 def evaluate_candidate(llm, resume_text, jd):
-    prompt = ChatPromptTemplate.from_template(SHORTLIST_PROMPT)
+    # USE THE UPDATED PROMPT ABOVE
+    prompt = ChatPromptTemplate.from_template(STRICT_SHORTLIST_PROMPT)
     chain = prompt | llm | StrOutputParser()
     try:
         response = chain.invoke({"resume_text": resume_text, "jd": jd})
-        if not response or "{" not in response:
-            return None
         
+        # --- CLEANUP & EXTRACTION ---
+        if "```" in response:
+            response = response.replace("```json", "").replace("```", "")
+        
+        # Find JSON object
         start = response.find("{")
         end = response.rfind("}") + 1
+        
+        if start == -1 or end == 0:
+            return None
+            
         cleaned = response[start:end]
         return json.loads(cleaned)
+
     except Exception as e:
-        st.error(f"LLM error: {e}")
         return None
+
 
 # ------------------------------------------------------------
 # CUSTOM CSS
@@ -1094,361 +1027,927 @@ def evaluate_candidate(llm, resume_text, jd):
 def load_custom_css():
     st.markdown("""
     <style>
-    [data-testid="stSidebar"] { background-color: #E8F1FA !important; padding-top: 30px !important; border-right: 1px solid #CFD9E6 !important; }
-    .sidebar-logo img { width: 120px !important; border-radius: 50% !important; display: block !important; margin-left: auto !important; margin-right: auto !important; margin-top: 10px !important; margin-bottom: 25px !important; }
-    .sidebar-title { color: #1E3A8A !important; font-size: 20px !important; font-weight: 700 !important; padding-left: 20px !important; margin-bottom: 20px !important; }
-    .sidebar .stRadio label { color: #1F2937 !important; font-size: 16px !important; font-weight: 600 !important; padding: 5px 10px !important; border-radius: 6px !important; }
-    [data-testid="stSidebar"] .stRadio label:hover { background-color: #DCEBFA !important; color: #1E40AF !important; }
-    [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label[data-selected="true"] { background-color: #D0E4FF !important; color: #1E3A8A !important; font-weight: 700 !important; border-radius: 6px !important; padding: 6px 12px !important; }
-    .badge-pass { background-color: #DEF7EC; color: #03543F; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-mid { background-color: #FEF3C7; color: #92400E; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-low { background-color: #FDE8E8; color: #9B1C1C; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-    .card { padding: 20px; background-color: #FFFFFF; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; color: #333; }
-    .main-title { color: #1E3A8A; font-weight: 800; margin-bottom: 10px; }
-    .section-header { color: #1E40AF; margin-top: 20px; margin-bottom: 10px; border-bottom: 2px solid #E5E7EB; padding-bottom: 5px; }
+
+    /* ------------------ GLOBAL BACKGROUND ------------------ */
+    .stApp {
+        background: linear-gradient(135deg, #F5F7FB 0%, #EEF2F7 100%);
+        color: #1F2937;
+    }
+
+    /* ------------------ PAGE TITLES ------------------ */
+    .page-title {
+        font-size: 34px;
+        font-weight: 800;
+        color: #0F172A;
+        margin-bottom: 4px;
+    }
+
+    .page-subtitle {
+        font-size: 15px;
+        color: #64748B;
+        margin-bottom: 24px;
+    }
+
+    /* ------------------ SIDEBAR ------------------ */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #E9EEF6, #F4F7FB);
+        border-right: 1px solid #D6DCE6;
+    }
+
+    [data-testid="stSidebar"] .stRadio label {
+        font-size: 15px;
+        font-weight: 600;
+        padding: 10px 14px;
+        border-radius: 8px;
+        margin-bottom: 6px;
+        transition: all 0.2s ease-in-out;
+    }
+
+    [data-testid="stSidebar"] .stRadio label:hover {
+        background-color: #FFE9D6;
+        color: #C2410C;
+    }
+
+    [data-testid="stSidebar"] .stRadio label[data-selected="true"] {
+        background-color: #FED7AA;
+        color: #9A3412;
+        font-weight: 700;
+    }
+
+    /* ------------------ CARDS ------------------ */
+    .card {
+        background: #FFFFFF;
+        border-radius: 14px;
+        padding: 22px;
+        margin-bottom: 20px;
+        box-shadow: 0px 10px 24px rgba(0, 0, 0, 0.05);
+    }
+
+    /* ------------------ KPI CARDS ------------------ */
+    .kpi-card {
+        background: linear-gradient(180deg, #FFFFFF, #FAFBFF);
+        border-radius: 16px;
+        padding: 22px;
+        box-shadow: 0px 12px 28px rgba(15, 23, 42, 0.08);
+        text-align: center;
+        transition: transform 0.2s ease;
+    }
+
+    .kpi-card:hover {
+        transform: translateY(-4px);
+    }
+
+    .kpi-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #64748B;
+        margin-bottom: 8px;
+    }
+
+    .kpi-value {
+        font-size: 34px;
+        font-weight: 800;
+        color: #0F172A;
+    }
+
+    /* ------------------ BUTTONS ------------------ */
+    button[kind="primary"] {
+        background: linear-gradient(135deg, #F97316, #EA580C);
+        color: white;
+        border-radius: 10px;
+        padding: 10px 18px;
+        font-weight: 700;
+        border: none;
+    }
+
+    button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #EA580C, #C2410C);
+    }
+
+    /* ------------------ SECTION HEADERS ------------------ */
+    .section-header {
+        font-size: 20px;
+        font-weight: 700;
+        color: #0F172A;
+        margin-top: 30px;
+        margin-bottom: 14px;
+        border-left: 5px solid #F97316;
+        padding-left: 12px;
+    }
+
+    /* ------------------ BADGES ------------------ */
+    .badge-pass {
+        background-color: #DCFCE7;
+        color: #166534;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .badge-mid {
+        background-color: #FEF3C7;
+        color: #92400E;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .badge-low {
+        background-color: #FEE2E2;
+        color: #991B1B;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+/* -------- GLASS SIDEBAR -------- */
+[data-testid="stSidebar"] {
+    background: rgba(236, 241, 248, 0.75);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-right: 1px solid rgba(203, 213, 225, 0.6);
+}
+/* -------- SIDEBAR ICON HOVER GLOW -------- */
+[data-testid="stSidebar"] .stRadio label:hover {
+    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.15),
+                0 4px 14px rgba(249, 115, 22, 0.25);
+}
+/* -------- ANIMATED PROGRESS BAR -------- */
+div[data-testid="stProgress"] > div > div {
+    background: linear-gradient(
+        90deg,
+        #F97316,
+        #FDBA74,
+        #F97316
+    );
+    background-size: 200% 100%;
+    animation: progressFlow 1.5s linear infinite;
+}
+
+@keyframes progressFlow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 200% 50%; }
+}
+
     </style>
     """, unsafe_allow_html=True)
+
 
 # ------------------------------------------------------------
 # SIDEBAR
 # ------------------------------------------------------------
 def sidebar_logo():
-    logo_path = "nx.png"
-    if os.path.exists(logo_path):
-        logo_encoded = base64.b64encode(open(logo_path, "rb").read()).decode()
-        st.sidebar.markdown(f"""<div class="sidebar-logo"><img src="data:image/png;base64,{logo_encoded}"></div>""", unsafe_allow_html=True)
-    else:
-        st.sidebar.markdown("<h2 style='text-align:center;'>HR AI</h2>", unsafe_allow_html=True)
-    
-    st.sidebar.markdown("<div class='sidebar-title'>Navigation</div>", unsafe_allow_html=True)
-    return st.sidebar.radio("", ["🏠 Dashboard", "📤 Upload Resumes", "📊 Shortlist Candidates", "📁 Manage Databases", "⚙️ Settings"])
+    logo_path = "nx_logo.png"
 
-# ------------------------------------------------------------
+    if os.path.exists(logo_path):
+        logo_encoded = base64.b64encode(
+            open(logo_path, "rb").read()
+        ).decode()
+
+        st.sidebar.markdown(f"""
+        <div style="text-align:center; margin-bottom:25px;">
+            <img src="data:image/png;base64,{logo_encoded}"
+                 style="width:120px; margin-bottom:10px;" />
+            <div style="font-size:18px; font-weight:800; color:#1E3A8A;">
+                NeuroInkX
+            </div>
+            <div style="font-size:13px; color:#64748B;">
+                HR AI Platform
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.sidebar.markdown(
+        "<div class='sidebar-title'>Navigation</div>",
+        unsafe_allow_html=True
+    )
+
+    # -------- MAIN APP NAVIGATION --------
+    menu = st.sidebar.radio(
+        "",
+        [
+            "🏠 Dashboard",
+            "📤 Upload Resumes",
+            "📊 Shortlist Candidates",
+            "📁 Manage Databases",
+            "⚙️ Settings"
+        ]
+    )
+
+    # -------- QUICK HIRE (EXTERNAL LINK) --------
+    st.sidebar.markdown(
+        """
+        <hr style="margin:12px 0;">
+        <a href="https://neuroinkx-quick-hire.netlify.app/"
+           target="_blank"
+           style="
+                display:flex;
+                align-items:center;
+                gap:8px;
+                padding:8px 12px;
+                border-radius:8px;
+                font-size:16px;
+                font-weight:600;
+                color:#1E40AF;
+                text-decoration:none;
+           "
+           onmouseover="this.style.background='#E0ECFF'"
+           onmouseout="this.style.background='transparent'"
+        >
+            📧 Quick Hire
+        </a>
+        """,
+        unsafe_allow_html=True
+    )
+
+    return menu
+
+
 # PAGE 1: DASHBOARD
 # ------------------------------------------------------------
 def render_dashboard_home():
     load_custom_css()
-    st.markdown("<h1 class='main-title'>HR Analytics Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='card'>A complete overview of your hiring pipeline and screening activity.</div>", unsafe_allow_html=True)
-    
+
+    # -------------------- HEADER --------------------
+    st.markdown("""
+    <div class="page-title">HR Analytics Dashboard</div>
+    <div class="page-subtitle">
+        Real-time overview of hiring performance & AI screening results
+    </div>
+    """, unsafe_allow_html=True)
+
+    # -------------------- DATA --------------------
     hist_meta = load_metadata("historical")
     curr_meta = load_metadata("current")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1: st.metric("Total Resumes", len(hist_meta))
-    with col2: st.metric("Shortlisted (Current DB)", len(curr_meta))
-    with col3:
-        today = datetime.now().strftime("%Y%m%d")
-        today_count = sum(1 for v in hist_meta.values() if v["upload_date"].startswith(today))
-        st.metric("Uploaded Today", today_count)
 
+    today = datetime.now().strftime("%Y%m%d")
+    today_count = sum(
+        1 for v in hist_meta.values()
+        if v.get("upload_date", "").startswith(today)
+    )
+
+    total_resumes = len(hist_meta)
     shortlisted = len(curr_meta)
-    rejected = max(0, len(hist_meta) - shortlisted)
-    if shortlisted + rejected > 0:
-        fig = px.pie(names=["Shortlisted", "Rejected"], values=[shortlisted, rejected], title="Shortlisting Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No data available for charts yet.")
+    rejected = max(0, total_resumes - shortlisted)
 
-    upload_dates = [v["upload_date"][:8] for v in hist_meta.values()]
-    if upload_dates:
-        df = pd.DataFrame(upload_dates, columns=["date"])
-        upload_trend = df["date"].value_counts().sort_index()
-        fig2 = px.line(x=upload_trend.index, y=upload_trend.values, title="Resume Upload Trend")
-        fig2.update_layout(xaxis_title="Date", yaxis_title="Uploads")
-        st.plotly_chart(fig2, use_container_width=True)
+    # -------------------- KPI CARDS --------------------
+    col1, col2, col3 = st.columns(3)
 
-# ------------------------------------------------------------
-# PAGE 2: UPLOAD
-# ------------------------------------------------------------
+    with col1:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-title">📄 Total Resumes</div>
+            <div class="kpi-value">{total_resumes}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-title">✅ Shortlisted</div>
+            <div class="kpi-value">{shortlisted}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-title">📅 Uploaded Today</div>
+            <div class="kpi-value">{today_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # -------------------- CHARTS --------------------
+    col_left, col_right = st.columns([2, 3])
+
+    # Pie Chart
+    with col_left:
+        st.markdown("### 📊 Shortlisting Distribution")
+        if shortlisted + rejected > 0:
+            fig = px.pie(
+                names=["Shortlisted", "Rejected"],
+                values=[shortlisted, rejected],
+                hole=0.5
+            )
+            fig.update_traces(textinfo="percent+label")
+            fig.update_layout(showlegend=True)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No shortlisting data available yet.")
+
+    # Upload Trend
+    with col_right:
+        st.markdown("### 📈 Resume Upload Trend")
+        upload_dates = [v["upload_date"][:8] for v in hist_meta.values() if "upload_date" in v]
+        if upload_dates:
+            df = pd.DataFrame(upload_dates, columns=["date"])
+            upload_trend = df["date"].value_counts().sort_index()
+            fig2 = px.line(
+                x=upload_trend.index,
+                y=upload_trend.values,
+                markers=True
+            )
+            fig2.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Resumes Uploaded"
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("No upload trend data available.")
+
 def render_upload_page(embeddings):
     load_custom_css()
-    st.markdown("<h1 class='main-title'>📤 Upload Resumes</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='card'>Upload resumes into the CURRENT database. After shortlisting, HR can archive them into the Historical Database.</div>", unsafe_allow_html=True)
+# page 2 uplaod resumes 
+    # -------------------- HEADER --------------------
+    st.markdown("""
+    <div class="page-title">📥 Resume Intake Center</div>
+    <div class="page-subtitle">
+        Centralized resume upload with AI parsing & OCR support
+    </div>
+    """, unsafe_allow_html=True)
 
-    uploaded_files = st.file_uploader("Drag & drop PDF/TXT files", type=["pdf", "txt"], accept_multiple_files=True, key="resume_uploader")
-    if st.button("Process Uploads", type="primary", key="process_upload_button"):
+    # -------------------- INFO BAR --------------------
+    st.markdown("""
+    <div class="info-box">
+        <b>Supported Formats:</b> PDF, TXT, JPG, JPEG, PNG <br>
+        <b>Image resumes:</b> OCR is applied automatically <br>
+        <b>Tip:</b> Clear, high-resolution images give better extraction accuracy
+    </div>
+    """, unsafe_allow_html=True)
+
+    # -------------------- UPLOAD CARD --------------------
+    st.markdown("""
+    <div class="card">
+        <h3>Upload Resumes</h3>
+        <p>
+        Upload resumes into the <b>Current Database</b>.  
+        After shortlisting, candidates can be archived into the <b>Historical Database</b>.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded_files = st.file_uploader(
+        "📂 Drag & drop or browse files",
+        type=["pdf", "txt", "jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key="resume_uploader"
+    )
+
+    if uploaded_files:
+        st.markdown(f"""
+        <div class="upload-stats">
+            📄 Files selected: <b>{len(uploaded_files)}</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # -------------------- PROCESS BUTTON --------------------
+    process = st.button("🚀 Process Uploads", type="primary", key="process_upload_button")
+
+    if process:
         if not uploaded_files:
             st.warning("Please upload at least one resume.")
             return
 
         existing_meta = load_metadata("current")
         existing_names = {m["original_name"].lower() for m in existing_meta.values()}
-        duplicates, new_files = [], []
 
+        duplicates, new_files = [], []
         for f in uploaded_files:
             (duplicates if f.name.lower() in existing_names else new_files).append(f)
 
+        # -------------------- DUPLICATE INFO --------------------
         if duplicates:
-            st.warning("⚠️ Duplicate resumes skipped:\n" + "\n".join([f"- {x.name}" for x in duplicates]))
+            st.warning(
+                "⚠️ Duplicate resumes skipped:\n\n" +
+                "\n".join([f"• {x.name}" for x in duplicates])
+            )
+
         if not new_files:
-            st.error("All uploaded resumes were duplicates in CURRENT DB.")
+            st.error("All uploaded resumes already exist in the CURRENT database.")
             return
 
+        st.markdown(f"""
+        <div class="upload-stats">
+            ✅ New files to process: <b>{len(new_files)}</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # -------------------- PROGRESS --------------------
         progress = st.progress(0)
         uploaded_info = []
+
         for idx, f in enumerate(new_files):
             try:
                 file_id, docs, text = process_upload(f, embeddings, "current")
-                uploaded_info.append({"File Name": f.name, "Preview": text[:200] + "..."})
+                uploaded_info.append({
+                    "File Name": f.name,
+                    "Preview": text[:200] + "..."
+                })
             except Exception as e:
-                st.error(f"Error processing {f.name}: {e}")
+                st.error(f"❌ Error processing {f.name}: {e}")
+
             progress.progress((idx + 1) / len(new_files))
 
-        st.success("🎉 Upload complete! Added to CURRENT database (Pinecone).")
+        st.success("🎉 Upload complete! Resumes added to CURRENT database.")
+
+        # -------------------- SUMMARY TABLE --------------------
         if uploaded_info:
-            st.markdown("<h3 class='section-header'>Uploaded Resumes Summary</h3>", unsafe_allow_html=True)
+            st.markdown("<h3 class='section-header'>📋 Upload Summary</h3>", unsafe_allow_html=True)
+
             df = pd.DataFrame(uploaded_info)
             builder = GridOptionsBuilder.from_dataframe(df)
             builder.configure_default_column(editable=False)
             builder.configure_pagination(enabled=True)
-            AgGrid(df, gridOptions=builder.build(), height=300, theme="balham", key="upload_summary_grid")
 
-# ------------------------------------------------------------
-# PAGE 3: AI SHORTLISTING (UPDATED)
+            AgGrid(
+                df,
+                gridOptions=builder.build(),
+                height=320,
+                theme="balham",
+                key="upload_summary_grid"
+            )
+
+# page 3 ai shoetlisting 
+    # ------------------------------------------------------------
+# PAGE 3: AI SHORTLISTING (FIXED & POLISHED)
 # ------------------------------------------------------------
 def render_shortlist_page(llm, embeddings):
     load_custom_css()
-    st.markdown("<h1 class='main-title'>📊 AI Resume Shortlisting</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='card'>The AI evaluates each resume against the provided Job Description. HR can export the report and archive the Current Database.</div>", unsafe_allow_html=True)
 
-    st.markdown("<h3 class='section-header'>Job Description</h3>", unsafe_allow_html=True)
-    template_option = st.selectbox("Select a JD Template", ["Write JD manually", "Software Engineer", "Data Analyst", "Backend Developer", "Flutter Developer", "Product Manager", "DevOps Engineer"])
-    
+    # ===================== HEADER =====================
+    st.markdown("""
+    <div class="page-title">🤖 AI Resume Shortlisting</div>
+    <div class="page-subtitle">
+        AI-powered evaluation of resumes against your Job Description
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="card">
+        <b>How it works</b><br>
+        • AI reads resumes (PDF / TXT / OCR Images)<br>
+        • Matches skills with Job Description<br>
+        • Generates score, decision & reasoning
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ===================== JOB DESCRIPTION =====================
+    st.markdown("<h3 class='section-header'>📄 Job Description</h3>", unsafe_allow_html=True)
+
+    template_option = st.selectbox(
+        "Choose a JD Template",
+        [
+            "Write JD manually",
+            "Software Engineer",
+            "Data Analyst",
+            "Backend Developer",
+            "Flutter Developer",
+            "Product Manager",
+            "DevOps Engineer"
+        ]
+    )
+
     jd_presets = {
-        "Software Engineer": "We need a Software Engineer skilled in DSA, Python/Java, OOP, Git, SQL, API development, and SDLC.",
-        "Data Analyst": "We seek a Data Analyst skilled in Excel, SQL, Python, dashboards, visualizations, and reporting.",
-        "Backend Developer": "We need a Backend Engineer skilled in Node.js, Express, REST APIs, MongoDB/MySQL, and authentication.",
-        "Flutter Developer": "We need a Flutter Developer with Dart skills, REST API integration, state management, and UI/UX.",
-        "Product Manager": "We need a PM experienced in PRDs, roadmaps, KPIs, user interviews, and cross-team communication.",
-        "DevOps Engineer": "We seek a DevOps Engineer skilled in AWS, Docker, CI/CD pipelines, Kubernetes, and monitoring."
+        "Software Engineer": "We need a Software Engineer skilled in DSA, Python/Java, OOP, Git, SQL, APIs, SDLC.",
+        "Data Analyst": "Looking for a Data Analyst skilled in Excel, SQL, Python, dashboards, insights.",
+        "Backend Developer": "Backend Engineer with Node.js, REST APIs, MongoDB/MySQL, authentication.",
+        "Flutter Developer": "Flutter Developer with Dart, state management, REST APIs, UI/UX.",
+        "Product Manager": "PM with PRDs, roadmaps, KPIs, user research, stakeholder communication.",
+        "DevOps Engineer": "DevOps Engineer skilled in AWS, Docker, CI/CD, Kubernetes, monitoring."
     }
-    jd = st.text_area("Enter JD", height=150) if template_option == "Write JD manually" else st.text_area("Enter JD", jd_presets[template_option], height=150)
 
-    st.markdown("<h3 class='section-header'>Candidate Source</h3>", unsafe_allow_html=True)
+    jd = st.text_area(
+        "Enter Job Description",
+        jd_presets.get(template_option, ""),
+        height=160
+    )
+
+    # ===================== CANDIDATE SOURCE =====================
+    st.markdown("<h3 class='section-header'>👥 Candidate Pool</h3>", unsafe_allow_html=True)
+
     db_key = "current"
-    metadata = load_metadata("current")
-    st.info(f"Total candidates in Current Database: **{len(metadata)}**")
+    metadata = load_metadata(db_key)
 
-    if st.button("🚀 Run AI Evaluation", type="primary"):
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.info(f"📂 Candidates available: **{len(metadata)}**")
+    with col2:
+        run_eval = st.button("🚀 Run AI Evaluation", type="primary")
+
+    # ===================== RUN AI EVALUATION =====================
+    if run_eval:
         if not jd or not metadata:
-            st.error("Please provide a JD and ensure candidates exist in the database.")
+            st.error("Please provide a Job Description and ensure resumes exist.")
             return
 
-        progress = st.progress(0)
         results = []
         total = len(metadata)
 
-        for idx, (file_id, info) in enumerate(metadata.items()):
-            resume_text = get_resume_text(file_id, db_key, embeddings)
-            if not resume_text: continue
+        with st.status("🤖 AI is evaluating resumes...", expanded=True) as status:
+            progress = st.progress(0)
 
-            eval_result = evaluate_candidate(llm, resume_text, jd)
-            if not eval_result: continue
+            for idx, (file_id, info) in enumerate(metadata.items()):
+                resume_text = get_resume_text(file_id, db_key, embeddings)
+                if not resume_text:
+                    continue
 
-            score = eval_result.get("score", 0)
-            
-            # Badge logic kept for potential future use or color coding if needed, 
-            # but will be hidden in table as per request.
-            if score >= 75: badge = "<span class='badge-pass'>Excellent</span>"
-            elif score >= 60: badge = "<span class='badge-mid'>Good</span>"
-            else: badge = "<span class='badge-low'>Poor</span>"
+                eval_result = evaluate_candidate(llm, resume_text, jd)
+                
+                # If evaluation fails, skip or use defaults
+                if not eval_result:
+                    eval_result = {}
 
-            info.update({
-                "name": eval_result.get("name", "-"),
-                "surname": eval_result.get("surname", "-"),
-                "phone": eval_result.get("phone", "-"),
-                "email": eval_result.get("email", "-")
-            })
-            save_metadata(metadata, db_key)
+                # -------- PARSING --------
+                # 1. Score
+                try:
+                    score = int(float(eval_result.get("score", 0)))
+                except:
+                    score = 0
+                
+                # 2. Details
+                decision = eval_result.get("decision", "Rejected")
+                reason_text = eval_result.get("reason", "Experience or Skill Mismatch detected (or parse error).")
+                role_fit = eval_result.get("role_fit", "Unmatched Role")
+                
+                # 3. Contact Info (Use extract if available, else keep existing)
+                cand_name = eval_result.get("name", info.get("name", "-"))
+                cand_surname = eval_result.get("surname", info.get("surname", "-"))
+                cand_email = eval_result.get("email", info.get("email", "-"))
+                cand_phone = eval_result.get("phone", info.get("phone", "-"))
 
-            results.append({
-                "Name": info["name"],
-                "Surname": info["surname"],
-                "Email": info["email"],
-                "Phone": info["phone"],
-                "Score": score,
-                "Decision": eval_result.get("decision", ""),
-                "Reason": eval_result.get("reason", ""),
-                # Hidden columns needed for logic
-                "Badge": badge,
-                "File Name": info["original_name"],
-                "Resume ID": file_id,
-                "Promoted": "No",
-                "Text": resume_text
-            })
-            progress.progress((idx + 1) / total)
+                # Badge Logic
+                if score >= 75:
+                    badge = "<span class='badge-pass'>Excellent</span>"
+                    decision = "Shortlisted"
+                elif score >= 60:
+                    badge = "<span class='badge-mid'>Good</span>"
+                    decision = "Shortlisted"
+                else:
+                    badge = "<span class='badge-low'>Poor</span>"
+                    decision = "Rejected"
+
+                # Update Meta & Results
+                info.update({
+                    "name": cand_name,
+                    "surname": cand_surname,
+                    "phone": cand_phone,
+                    "email": cand_email
+                })
+                save_metadata(metadata, db_key)
+
+                results.append({
+                    "Name": cand_name,
+                    "Surname": cand_surname,
+                    "Email": cand_email,
+                    "Phone": cand_phone,
+                    "Score": score,
+                    "Decision": decision,
+                    "Reason": reason_text,
+                    "Role": role_fit,
+                    "Badge": badge,
+                    "Resume ID": file_id,
+                    "Text": resume_text
+                })
+
+                progress.progress((idx + 1) / total)
+
+            status.update(
+                label="✅ Evaluation completed successfully",
+                state="complete"
+            )
 
         if not results:
-            st.error("No results generated.")
+            st.error("No candidates evaluated.")
             return
-        
-        st.success("🎉 Evaluation Complete!")
-        st.session_state['shortlist_results'] = results
 
-    if 'shortlist_results' in st.session_state:
-        results = st.session_state['shortlist_results']
+        st.session_state["shortlist_results"] = results
+        st.success("🎉 AI Evaluation Completed Successfully")
+
+    # ===================== RESULTS VIEW =====================
+    if "shortlist_results" in st.session_state:
+        results = st.session_state["shortlist_results"]
+
+        scores = [r["Score"] for r in results]
+        shortlisted = len([s for s in scores if s >= 60])
+        rejected = len(scores) - shortlisted
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.markdown(f"<div class='kpi-card'><div class='kpi-title'>📄 Evaluated</div><div class='kpi-value'>{len(scores)}</div></div>", unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"<div class='kpi-card'><div class='kpi-title'>✅ Shortlisted</div><div class='kpi-value'>{shortlisted}</div></div>", unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"<div class='kpi-card'><div class='kpi-title'>❌ Rejected</div><div class='kpi-value'>{rejected}</div></div>", unsafe_allow_html=True)
+
+        st.markdown("<h3 class='section-header'>📊 Candidate Results</h3>", unsafe_allow_html=True)
+
+        for r in results:
+            st.markdown(f"""
+            <div class="candidate-card">
+                <div class="candidate-header">
+                    <span>{r['Name']} {r['Surname']}</span>
+                    {r['Badge']}
+                </div>
+                <div class="candidate-meta">
+                    📧 {r['Email']} &nbsp; | &nbsp; 📞 {r['Phone']}<br>
+                    🎯 Role Match: <b>{r['Role']}</b>
+                </div>
+                <div class="candidate-score">
+                    Score: <b>{r['Score']}</b> / 100 — <b>{r['Decision']}</b>
+                </div>
+                <div class="candidate-reason">
+                    <b>AI Reason:</b> {r['Reason']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("📄 View Resume Text"):
+                st.text_area("Resume", r["Text"], height=260)
+
+        # ===================== EXPORT =====================
+        st.markdown("<h3 class='section-header'>📥 Export Results</h3>", unsafe_allow_html=True)
+
         df = pd.DataFrame(results)
+        export_cols = ["Name", "Surname", "Email", "Phone", "Score", "Decision", "Reason", "Role"]
+        df_export = df[[c for c in export_cols if c in df.columns]]
 
-        st.markdown("<h3 class='section-header'>Evaluation Results</h3>", unsafe_allow_html=True)
-
-        builder = GridOptionsBuilder.from_dataframe(df)
-        builder.configure_pagination(enabled=True)
-        builder.configure_default_column(editable=False, filter=True, sortable=True)
-        builder.configure_selection("single")
-
-        # --- UPDATE: Hide columns user does not want to see ---
-        # User requested: name, surname, email, phone, score, decision, reason ONLY.
-        cols_to_hide = ["File Name", "Resume ID", "Promoted", "Text", "Badge"]
-        for col in cols_to_hide:
-            builder.configure_column(col, hide=True)
-        
-        # Ensure Score is treated as a number
-        builder.configure_column("Score", type=["numericColumn", "numberColumnFilter"])
-
-        grid = AgGrid(df, gridOptions=builder.build(), height=420, theme="material", update_mode="MODEL_CHANGED", key="shortlist_grid")
-        selected = grid["selected_rows"]
-
-        # Resume Viewer Logic
-        if selected:
-            st.markdown("<h3 class='section-header'>Resume Viewer & Actions</h3>", unsafe_allow_html=True)
-            row = selected[0]
-            col_view, col_action = st.columns([3, 1])
-            with col_view:
-                st.write(f"### {row['Name']} {row['Surname']}")
-                st.write(f"📧 {row['Email']} | 📞 {row['Phone']}")
-                # Using Badge HTML here is fine for detail view, just not table
-                st.markdown(f"**Score:** {row['Score']} " + row['Badge'], unsafe_allow_html=True)
-            with col_action:
-                st.write("Does this candidate not fit?")
-                if st.button("🗑️ Delete Candidate", type="secondary"):
-                    delete_from_db(row["Resume ID"], "current", embeddings)
-                    st.warning(f"Deleted {row['Name']} {row['Surname']}. Please re-run evaluation.")
-                    st.session_state['shortlist_results'] = [r for r in results if r['Resume ID'] != row['Resume ID']]
-                    st.rerun()
-            st.write("---")
-            st.text_area("Resume Text", row["Text"], height=350)
-
-        # --- UPDATE: Export Buttons (Single CSV Only) ---
-        st.markdown("<h3 class='section-header'>Export Results</h3>", unsafe_allow_html=True)
-        
-        # Prepare clean dataframe for export (only requested columns)
-        export_columns = ["Name", "Surname", "Email", "Phone", "Score", "Decision", "Reason"]
-        # Ensure these columns exist before selecting
-        valid_export_cols = [c for c in export_columns if c in df.columns]
-        df_export = df[valid_export_cols]
-
-        csv_data = df_export.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📄 Download CSV",
-            data=csv_data,
-            file_name="shortlist_results.csv",
-            mime="text/csv",
-            key="download-csv"
+            "⬇️ Download CSV",
+            df_export.to_csv(index=False).encode("utf-8"),
+            "shortlist_results.csv",
+            "text/csv"
         )
 
 # ------------------------------------------------------------
-# PAGE 4: MANAGE DB
+# PAGE 4: MANAGE DATABASES (FIXED + PREMIUM UI)
 # ------------------------------------------------------------
 def render_manage_databases_page(embeddings):
     load_custom_css()
-    st.markdown("<h1 class='main-title'>📁 Manage Databases</h1>", unsafe_allow_html=True)
+
+    # ===================== HEADER =====================
+    st.markdown("""
+    <div class="page-title">📁 Database Management</div>
+    <div class="page-subtitle">
+        Manage, archive, and clean resume databases safely
+    </div>
+    """, unsafe_allow_html=True)
+
     tabs = st.tabs(["📚 Historical Database", "⭐ Current Database"])
 
+    # =================================================
+    # INTERNAL RENDER FUNCTION
+    # =================================================
     def render_db(db_key):
         meta = load_metadata(db_key)
+
+        # ---------------- EMPTY STATE ----------------
         if not meta:
-            st.warning("Database is empty.")
+            st.markdown("""
+            <div class="card">
+                <b>No resumes found</b><br>
+                Upload resumes to start managing this database.
+            </div>
+            """, unsafe_allow_html=True)
             return
 
-        st.markdown(f"<div class='card'>Total resumes stored: <b>{len(meta)}</b></div>", unsafe_allow_html=True)
-        df = pd.DataFrame.from_dict(meta, orient="index")
-        for col in ["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]:
-            if col not in df.columns: df[col] = "-"
+        # ---------------- STATS ----------------
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-title">📄 Total Resumes</div>
+            <div class="kpi-value">{len(meta)}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        view_df = df[["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]]
-        view_df.columns = ["File Name", "First Name", "Last Name", "Email", "Phone", "Upload Date", "Size"]
-        
+        # ---------------- TABLE ----------------
+        df = pd.DataFrame.from_dict(meta, orient="index")
+
+        for col in ["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]:
+            if col not in df.columns:
+                df[col] = "-"
+
+        view_df = df[
+            ["original_name", "name", "surname", "email", "phone", "upload_date", "file_size"]
+        ]
+
+        view_df.columns = [
+            "File Name",
+            "First Name",
+            "Last Name",
+            "Email",
+            "Phone",
+            "Upload Date",
+            "Size (bytes)"
+        ]
+
         builder = GridOptionsBuilder.from_dataframe(view_df)
         builder.configure_default_column(editable=False, filter=True, sortable=True)
         builder.configure_pagination(enabled=True)
         builder.configure_selection("multiple")
-        grid = AgGrid(view_df, gridOptions=builder.build(), height=380, theme="balham", key=f"{db_key}_grid")
+
+        grid = AgGrid(
+            view_df,
+            gridOptions=builder.build(),
+            height=400,
+            theme="balham",
+            key=f"{db_key}_grid"
+        )
+
         selected = grid["selected_rows"]
 
-        st.markdown("<h3 class='section-header'>Delete Selected</h3>", unsafe_allow_html=True)
-        if st.button(f"🗑️ Delete from {db_key.title()}", key=f"delete_{db_key}"):
-            if not selected: st.warning("No resumes selected.")
+        # ---------------- DELETE SELECTED ----------------
+        st.markdown("<h3 class='section-header'>🗑️ Delete Selected Resumes</h3>", unsafe_allow_html=True)
+
+        if st.button(f"Delete Selected from {db_key.title()}", type="secondary", key=f"delete_{db_key}"):
+            if not selected:
+                st.warning("Please select at least one resume.")
             else:
                 for row in selected:
                     for fid, m in meta.items():
-                        if m["original_name"] == row["File Name"]: delete_from_db(fid, db_key, embeddings)
-                st.success("Deleted successfully.")
+                        if m["original_name"] == row["File Name"]:
+                            delete_from_db(fid, db_key, embeddings)
+                st.success("Selected resumes deleted successfully.")
                 st.rerun()
 
+        # ---------------- ARCHIVE ----------------
         if db_key == "current":
-            st.markdown("<h3 class='section-header'>Archive</h3>", unsafe_allow_html=True)
-            if st.button("📦 Archive Current → Historical", key="archive_db"):
-                hist_meta = load_metadata("historical")
+            st.markdown("<h3 class='section-header'>📦 Archive Database</h3>", unsafe_allow_html=True)
+
+            st.markdown("""
+            <div class="info-box">
+                Archiving moves all CURRENT resumes into the HISTORICAL database.<br>
+                <b>This action cannot be undone.</b>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("Archive Current → Historical", type="primary", key="archive_db"):
                 progress_bar = st.progress(0)
                 total_files = len(meta)
+
                 for idx, (fid, info) in enumerate(meta.items()):
                     text = get_resume_text(fid, "current", embeddings)
                     if text:
-                        doc = Document(page_content=text, metadata={"source": info["original_name"]})
-                        add_to_vectordb([doc], embeddings, "historical", fid, info["original_name"], info)
+                        doc = Document(
+                            page_content=text,
+                            metadata={"source": info["original_name"]}
+                        )
+                        add_to_vectordb(
+                            [doc],
+                            embeddings,
+                            "historical",
+                            fid,
+                            info["original_name"],
+                            info
+                        )
                     progress_bar.progress((idx + 1) / total_files)
+
                 clear_database("current")
-                st.success("Archived to Historical DB successfully (Vectors Moved).")
+                st.success("All resumes archived successfully.")
                 st.rerun()
 
-        st.markdown("<h3 class='section-header'>Danger Zone</h3>", unsafe_allow_html=True)
-        if st.button(f"🔥 Clear Entire {db_key.title()} Database", key=f"clear_{db_key}"):
+        # ---------------- DANGER ZONE ----------------
+        st.markdown("<h3 class='section-header'>⚠️ Danger Zone</h3>", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="danger-box">
+            This will permanently delete <b>ALL</b> resumes from this database.
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button(
+            f"🔥 Clear Entire {db_key.title()} Database",
+            type="secondary",
+            key=f"clear_{db_key}"
+        ):
             clear_database(db_key)
-            st.success(f"{db_key.title()} database cleared.")
+            st.success(f"{db_key.title()} database cleared permanently.")
             st.rerun()
 
-    with tabs[0]: render_db("historical")
-    with tabs[1]: render_db("current")
+    # ===================== TAB RENDER =====================
+    with tabs[0]:
+        render_db("historical")
+
+    with tabs[1]:
+        render_db("current")
+
 
 # ------------------------------------------------------------
 # PAGE 5: SETTINGS
 # ------------------------------------------------------------
 def render_settings_page():
     load_custom_css()
-    st.markdown("<h1 class='main-title'>⚙️ Application Settings</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='card'>Modify preferences related to the AI model, UI theme, and scoring thresholds.</div>", unsafe_allow_html=True)
 
-    st.markdown("<h3 class='section-header'>LLM Model</h3>", unsafe_allow_html=True)
-    model = st.selectbox("Choose AI Model", ["llama-3.1-8b-instant", "llama-3.1-70b", "mixtral-8x7b", "gemma-7b"], index=0)
-    st.info(f"Selected model will apply after page restart: **{model}**")
+    # ===================== HEADER =====================
+    st.markdown("""
+    <div class="page-title">⚙️ Application Settings</div>
+    <div class="page-subtitle">
+        Configure AI behavior, scoring logic, and UI preferences
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("<h3 class='section-header'>Shortlisting Thresholds</h3>", unsafe_allow_html=True)
-    shortlist_threshold = st.slider("Minimum Score for Shortlisting", 0, 100, 60)
-    excellent_threshold = st.slider("Excellent Candidate Score", 0, 100, 75)
-    st.success(f"Updated thresholds: Shortlist ≥ {shortlist_threshold}, Excellent ≥ {excellent_threshold}")
+    # ===================== AI MODEL =====================
+    st.markdown("<h3 class='section-header'>🤖 AI Model Configuration</h3>", unsafe_allow_html=True)
 
-    st.markdown("<h3 class='section-header'>Theme</h3>", unsafe_allow_html=True)
-    theme = st.selectbox("UI Theme", ["Dark (recommended)", "Light", "High Contrast"])
-    st.info(f"Selected theme: **{theme}** (Will apply in next release)")
+    model = st.selectbox(
+        "Select LLM Model",
+        [
+            "llama-3.1-8b-instant",
+            "llama-3.1-70b",
+            "mixtral-8x7b",
+            "gemma-7b"
+        ],
+        index=0
+    )
+
+    st.info(f"Selected model will apply after application restart: **{model}**")
+
+    # ===================== SCORING =====================
+    st.markdown("<h3 class='section-header'>📊 Shortlisting Thresholds</h3>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        shortlist_threshold = st.slider(
+            "Minimum score to shortlist",
+            0, 100, 60
+        )
+    with col2:
+        excellent_threshold = st.slider(
+            "Excellent candidate score",
+            0, 100, 75
+        )
+
+    st.markdown(f"""
+    <div class="info-box">
+        Candidates with score ≥ <b>{shortlist_threshold}</b> will be shortlisted.<br>
+        Candidates with score ≥ <b>{excellent_threshold}</b> will be marked excellent.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ===================== UI =====================
+    st.markdown("<h3 class='section-header'>🎨 UI Preferences</h3>", unsafe_allow_html=True)
+
+    theme = st.selectbox(
+        "Select Theme",
+        ["Dark (recommended)", "Light", "High Contrast"]
+    )
+
+    st.info(f"Theme will apply in next release: **{theme}**")
+
+    # ===================== SAVE =====================
+    st.markdown("<br>", unsafe_allow_html=True)
     st.button("💾 Save Settings", type="primary")
+
 
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
 def main():
-    st.set_page_config(page_title="Dual-DB Resume Shortlister", page_icon="🤖", layout="wide")
+    st.set_page_config(
+        page_title="NeuroInkX HR AI Platform",
+        page_icon="🤖",
+        layout="wide"
+    )
+
     load_custom_css()
     init_storage()
+
     llm = load_llm()
     embeddings = load_embeddings()
+
+    # ✅ Sidebar menu
     menu = sidebar_logo()
 
-    if menu == "🏠 Dashboard": render_dashboard_home()
-    elif menu == "📤 Upload Resumes": render_upload_page(embeddings)
-    elif menu == "📊 Shortlist Candidates": render_shortlist_page(llm, embeddings)
-    elif menu == "📁 Manage Databases": render_manage_databases_page(embeddings)
-    elif menu == "⚙️ Settings": render_settings_page()
+    # ✅ ROUTING BASED ON MENU
+    if menu == "🏠 Dashboard":
+        render_dashboard_home()
+
+    elif menu == "📤 Upload Resumes":
+        render_upload_page(embeddings)
+
+    elif menu == "📊 Shortlist Candidates":
+        render_shortlist_page(llm, embeddings)
+
+    elif menu == "📁 Manage Databases":
+        render_manage_databases_page(embeddings)
+
+    # ✅ QUICK HIRE REDIRECT (NEW TAB)
+    elif menu == "📧 Quick Hire":
+        st.markdown(
+            """
+            <script>
+                window.open("https://neuroinkx-quick-hire.netlify.app/", "_blank");
+            </script>
+            """,
+            unsafe_allow_html=True
+        )
+        st.info("🚀 Opening Quick Hire in a new tab...")
+
+    elif menu == "⚙️ Settings":
+        render_settings_page()
+
 
 if __name__ == "__main__":
     main()
