@@ -16,19 +16,26 @@
 #faiss-cpu
 #pypdf
 
+
+
+
 streamlit
 pandas
 python-dotenv
-plotly
-streamlit-aggrid
+langchain
 langchain-community
 langchain-core
-langchain-text-splitters
 langchain-groq
 langchain-huggingface
+langchain-pinecone
+pinecone-client
 sentence-transformers
-faiss-cpu
 pypdf
+easyocr
+pillow
+numpy<2.0.0
+st-aggrid
+plotly
 
 
 
